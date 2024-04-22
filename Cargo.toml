@@ -1,5 +1,5 @@
 [package]
-name = "quote-clipper"
+name = "magiclip"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,3 +9,4 @@ edition = "2021"
 srtlib = "0.1.7"
 anyhow = { version = "1.0.75", features = ["backtrace"] }
 regex = "1.10.2"
+itertools = "0.12.1"
