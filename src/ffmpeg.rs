@@ -1,5 +1,7 @@
 use std::{
     borrow::Cow,
+    cell::LazyCell,
+    collections::HashMap,
     default,
     ffi::OsStr,
     fs::create_dir_all,
@@ -7,12 +9,58 @@ use std::{
     ops::Not as _,
     path::{Path, PathBuf},
     process::Command,
+    sync::LazyLock,
     time::Duration,
 };
 
 use anyhow::{ensure, Result};
 use itertools::Itertools as _;
+use scopeguard::{defer, ScopeGuard};
 use srtlib::{Subtitle, Timestamp};
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, clap::ValueEnum, strum::Display)]
+pub enum EncodingProfile {
+    AV1,
+    FLAC,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EncodingSettings {
+    pub ext: &'static str,
+    pub params: Vec<(&'static str, &'static str)>,
+}
+
+static ENCODING_PROFILES: LazyLock<HashMap<EncodingProfile, EncodingSettings>> =
+    LazyLock::new(|| {
+        vec![
+            (
+                EncodingProfile::AV1,
+                EncodingSettings {
+                    ext: "mkv",
+                    params: vec![
+                        ("-c:v", "libsvtav1"),
+                        ("-crf:v", "10"),
+                        ("-preset:v", "6"),
+                        (
+                            "-svtav1-params",
+                            "tune=0:film-grain=50:film-grain-denoise=0:enable-variance-boost=1",
+                        ),
+                        ("-c:a", "libopus"),
+                        ("-b:a", "92k"),
+                    ],
+                },
+            ),
+            (
+                EncodingProfile::FLAC,
+                EncodingSettings {
+                    ext: "flac",
+                    params: vec![("-c:v", "none"), ("-c:a", "flac"), ("-ac", "2")],
+                },
+            ),
+        ]
+        .into_iter()
+        .collect()
+    });
 
 pub fn get_sub_files_in_dir(
     p: impl AsRef<Path>,
@@ -86,75 +134,60 @@ fn _how_many_subs(p: impl AsRef<Path>) -> Result<usize> {
         .count())
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub struct VideoEncodingSettings {
-    // TODO bounds/type check these params
-    pub crf: u8,
-
-    pub preset: u8,
-}
-
-impl Default for VideoEncodingSettings {
-    fn default() -> Self {
-        Self { crf: 30, preset: 6 }
-    }
-}
-pub struct AudioEncodingSettings {
-    pub acodec: &'static str,
-
-    pub b_a: &'static str,
-}
-
-impl Default for AudioEncodingSettings {
-    fn default() -> Self {
-        Self {
-            acodec: "libopus",
-            b_a: "92k",
-        }
-    }
-}
-
-pub enum EncodingSettings {
-    AudioAndVideo(VideoEncodingSettings, AudioEncodingSettings),
-    AudioOnly(AudioEncodingSettings),
-}
-
 // TODO encoding settings
 /// Clips `sub` belonging to `file`
 /*pub fn clip_one(sub: &Subtitle, file: &Path) {
     sub.start_time
 }*/
 
-pub fn clip(start: &Timestamp, end: &Timestamp, infile: &Path, outfile: &Path) -> Result<()> {
+pub fn clip(
+    infile: &Path,
+    outfile: &Path,
+    start: &Timestamp,
+    end: &Timestamp,
+    profile: EncodingProfile,
+) -> Result<()> {
     ensure!(end > start);
     let mut duration = end.clone();
     duration.sub(&start);
+
+    #[allow(dropping_references)]
     std::mem::drop(end);
 
-    let (start, duration) = (ffmpeg_duration(start), ffmpeg_duration(&duration));
-    _clip(&start, &duration, infile, outfile)
+    let (start, duration) = (timestamp_to_string(start), timestamp_to_string(&duration));
+    _clip(infile, outfile, &start, &duration, profile)
 }
 
-fn _clip(start: &str, duration: &str, infile: &Path, outfile: &Path) -> Result<()> {
-    let out = dbg!(Command::new("ffmpeg").args([
-        "-ss",
-        start,
-        "-i",
-        infile.to_string_lossy().as_ref(),
-        "-t",
-        duration,
-        "-c:v",
-        "libsvtav1",
-        "-crf",
-        "24",
-        "-preset",
-        "6",
-        "-c:a",
-        "libopus",
-        "-b:a",
-        "92k",
-        &(outfile.to_string_lossy().as_ref().to_owned() + ".mkv"),
-    ]))
+fn _clip(
+    infile: &Path,
+    outfile_basename: &Path,
+    start: &str,
+    duration: &str,
+    profile: EncodingProfile,
+) -> Result<()> {
+    let settings = ENCODING_PROFILES
+        .get(&profile)
+        .expect("[ASSERT] not all encoding profiles covered");
+    let outfile = format!("{}.{}", outfile_basename.to_string_lossy(), settings.ext);
+
+    // delete temp file on failure
+    let rm_temp = scopeguard::guard(Path::new(&outfile), |outfile| {
+        let _ = std::fs::remove_file(&outfile);
+    });
+
+    let out = dbg!(Command::new("ffmpeg")
+        .args([
+            // seek in input to sub start
+            "-ss",
+            start,
+            "-i",
+            infile.to_string_lossy().as_ref(),
+            // stop encoding after sub duration
+            "-t",
+            duration,
+        ])
+        .args(settings_to_args(settings))
+        .arg(&outfile))
     .output()?;
     ensure!(
         out.status.success(),
@@ -162,7 +195,20 @@ fn _clip(start: &str, duration: &str, infile: &Path, outfile: &Path) -> Result<(
         String::from_utf8_lossy(&out.stderr)
     );
 
+    // defuse ScopeGuard for deleting temp
+    let _ = ScopeGuard::into_inner(rm_temp);
     Ok(())
+}
+
+fn settings_to_args<'a>(settings: &'a EncodingSettings) -> Vec<&'a str> {
+    let mut result = Vec::new();
+    settings.params.iter().for_each(|(k, v)| {
+        result.push(*k);
+        if v.is_empty().not() {
+            result.push(*v);
+        }
+    });
+    result
 }
 
 /// # Examples
@@ -211,7 +257,7 @@ fn _clip(start: &str, duration: &str, infile: &Path, outfile: &Path) -> Result<(
 /// 23.189
 /// 23.189 seconds
 /// ```
-fn ffmpeg_duration(t: &Timestamp) -> String {
+fn timestamp_to_string(t: &Timestamp) -> String {
     let (h, m, s, ms) = t.get();
     format!("{h:02}:{m:02}:{s:02}.{ms:03}")
 }
@@ -223,7 +269,7 @@ mod test {
     #[test]
     fn ffmpeg_duration() {
         assert_eq!(
-            &super::ffmpeg_duration(&Timestamp::new(1, 2, 3, 50)),
+            &super::timestamp_to_string(&Timestamp::new(1, 2, 3, 50)),
             "01:02:03.050"
         );
     }

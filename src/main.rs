@@ -2,14 +2,17 @@
 #![feature(exit_status_error)]
 #![feature(path_file_prefix)]
 
+use clap::Parser;
 use itertools::Itertools as _;
 use std::{
+    borrow::Borrow,
     collections::HashMap,
     io::stdin,
     path::{Component, Path, PathBuf},
 };
 use sub::SubContainedByFile;
 
+mod cli;
 mod clip;
 mod ffmpeg;
 mod fzf;
@@ -22,6 +25,8 @@ const OUTPUT_DIR: &str = "/tmp/tmp.Z3fu02h0P5";
 const MAX_FILENAME_LEN: usize = 64;
 
 fn main() -> anyhow::Result<()> {
+    let args = cli::Args::parse();
+
     let (files, file_errors): (Vec<_>, Vec<_>) = stdin()
         .lines()
         .map_ok(|l| {
@@ -113,21 +118,34 @@ fn main() -> anyhow::Result<()> {
             let outfile =
                 PathBuf::from(OUTPUT_DIR)
                     .join("!out")
-                    .join(util::escape_for_unix_filename(
+                    .join(util::escape_for_unix_filename(&format!(
+                        "{} ({}, [{}], p={})",
                         &(clip
                             .0
                             .text
                             .chars()
                             .take(MAX_FILENAME_LEN)
                             .collect::<String>()),
-                    ));
+                        infile
+                            .file_stem()
+                            .map(|s| s.to_string_lossy())
+                            .unwrap_or_else(|| "…empty…".to_owned().into()),
+                        &clip.0.start_time,
+                        args.profile
+                    )));
             std::fs::create_dir_all(
                 outfile
                     .parent()
                     .expect("No parent on outfile? Probably something fishy here"),
             )?;
 
-            ffmpeg::clip(&clip.0.start_time, &clip.0.end_time, &infile, &outfile)?;
+            ffmpeg::clip(
+                &infile,
+                &outfile,
+                &clip.0.start_time,
+                &clip.0.end_time,
+                args.profile,
+            )?;
             anyhow::Ok(outfile)
         })
         .for_each(|f| println!("{:?}", f));

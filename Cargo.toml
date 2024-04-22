@@ -10,3 +10,6 @@ srtlib = "0.1.7"
 anyhow = { version = "1.0.75", features = ["backtrace"] }
 regex = "1.10.2"
 itertools = "0.12.1"
+clap = { version = "4.5.4", features = ["derive", "wrap_help", "unicode"] }
+scopeguard = "1.2.0"
+strum = { version = "0.26.2", features = ["derive"] }
