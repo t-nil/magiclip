@@ -47,6 +47,7 @@ static ENCODING_PROFILES: LazyLock<HashMap<EncodingProfile, EncodingSettings>> =
                         ),
                         ("-c:a", "libopus"),
                         ("-b:a", "92k"),
+                        ("-ac", "2"),
                     ],
                 },
             ),
