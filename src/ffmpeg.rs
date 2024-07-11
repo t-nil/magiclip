@@ -1,8 +1,6 @@
 use std::{
     borrow::Cow,
-    cell::LazyCell,
     collections::HashMap,
-    default,
     ffi::OsStr,
     fs::create_dir_all,
     io::BufRead,
@@ -10,13 +8,12 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::LazyLock,
-    time::Duration,
 };
 
 use anyhow::{ensure, Result};
 use itertools::Itertools as _;
-use scopeguard::{defer, ScopeGuard};
-use srtlib::{Subtitle, Timestamp};
+use scopeguard::ScopeGuard;
+use srtlib::Timestamp;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, clap::ValueEnum, strum::Display)]
 #[allow(clippy::upper_case_acronyms)]
@@ -71,8 +68,7 @@ pub fn get_sub_files_in_dir(
     let output_dir = PathBuf::from(output_dir.as_ref()).join(
         p.as_ref()
             .file_name()
-            .map(OsStr::to_string_lossy)
-            .unwrap_or(Cow::Borrowed("…empty…"))
+            .map_or(Cow::Borrowed("…empty…"), OsStr::to_string_lossy)
             .as_ref(),
     );
     create_dir_all(&output_dir)?;
@@ -81,7 +77,7 @@ pub fn get_sub_files_in_dir(
         t if t.is_dir() => std::fs::read_dir(p)?
             .flat_map(|entry| {
                 let entry = entry?;
-                let output_dir = (&output_dir).clone();
+                let output_dir = output_dir.clone();
                 get_sub_files_in_dir(entry.path(), output_dir)
             })
             .flatten()
@@ -98,7 +94,7 @@ pub fn get_sub_files_in_dir(
 
 pub fn get_sub_files(p: impl AsRef<Path>, output_dir: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
     Ok((0..(_how_many_subs(p.as_ref())?))
-        .map(|i| {
+        .flat_map(|i| {
             let outfile = output_dir.as_ref().to_path_buf().join(format!("{i}.srt"));
             if outfile.exists().not() {
                 let out = Command::new("ffmpeg")
@@ -113,7 +109,6 @@ pub fn get_sub_files(p: impl AsRef<Path>, output_dir: impl AsRef<Path>) -> Resul
 
             Ok(outfile)
         })
-        .flatten()
         .collect_vec())
 }
 
@@ -130,7 +125,7 @@ fn _how_many_subs(p: impl AsRef<Path>) -> Result<usize> {
         .lines()
         .filter(|l| {
             l.as_ref()
-                .map(|ref s| s.trim() == "[STREAM]")
+                .map(|s| s.trim() == "[STREAM]")
                 .unwrap_or(false)
         })
         .count())
@@ -150,8 +145,8 @@ pub fn clip(
     profile: EncodingProfile,
 ) -> Result<()> {
     ensure!(end > start);
-    let mut duration = end.clone();
-    duration.sub(&start);
+    let mut duration = *end;
+    duration.sub(start);
 
     #[allow(dropping_references)]
     std::mem::drop(end);
@@ -174,7 +169,7 @@ fn _clip(
 
     // delete temp file on failure
     let rm_temp = scopeguard::guard(Path::new(&outfile), |outfile| {
-        let _ = std::fs::remove_file(&outfile);
+        let _ = std::fs::remove_file(outfile);
     });
 
     let out = dbg!(Command::new("ffmpeg")
@@ -202,7 +197,7 @@ fn _clip(
     Ok(())
 }
 
-fn settings_to_args<'a>(settings: &'a EncodingSettings) -> Vec<&'a str> {
+fn settings_to_args(settings: &EncodingSettings) -> Vec<&str> {
     let mut result = Vec::new();
     settings.params.iter().for_each(|(k, v)| {
         result.push(*k);
@@ -219,7 +214,7 @@ fn settings_to_args<'a>(settings: &'a EncodingSettings) -> Vec<&'a str> {
 /// assert_eq!(ffmpeg_duration(Timestamp::new(1, 2, 3, 50)), "01:02:03.050");
 /// ```
 ///
-/// # From FFmpeg manual
+/// # From `FFmpeg` manual
 ///
 /// ```doc
 /// Time duration

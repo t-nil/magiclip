@@ -1,12 +1,8 @@
 use ::serde::{Deserialize, Serialize};
 use anyhow::Result;
-use chrono::{DateTime, Local, NaiveDateTime};
-use sha2::digest::generic_array::{typenum::U32, GenericArray};
-use sha2::{Digest, Sha256};
 use srtlib::Subtitles;
 use std::collections::HashMap;
-use std::ops::Deref;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod subdb {
 
@@ -15,12 +11,11 @@ mod subdb {
         collections::HashMap,
         fs::File,
         io::BufReader,
-        ops::Deref,
         os::unix::fs::MetadataExt as _,
         path::{Path, PathBuf},
     };
 
-    use chrono::{DateTime, Local, Utc};
+    use chrono::{DateTime, Utc};
     use serde::{Deserialize, Serialize};
 
     use super::Subtitle;
@@ -79,6 +74,9 @@ mod subdb {
         /// # Important
         /// This compares ctime instead of mtime to detect renames.
         pub fn has_changed(&self) -> Result<EntryChanged> {
+            #[allow(clippy::wildcard_imports)]
+            use EntryChanged::*;
+
             // return ctime or mtime, whatever changed more recently
             fn relevant_timestamp(meta: &std::fs::Metadata) -> Result<i64> {
                 let ctime = meta.ctime().checked_mul(10i64.pow(9)).and_then(|ts| ts.checked_add(meta.ctime_nsec())).ok_or_else(|| anyhow!("nanos not fitting in i64. either corruption or we have the year ~2540+"))?;
@@ -88,7 +86,6 @@ mod subdb {
                 Ok(Ord::max(ctime, mtime))
             }
 
-            use EntryChanged::*;
             if !self.meta.video_path.exists() || !self.meta.video_path.is_file() {
                 return Ok(NoLongerExists);
             }
@@ -140,7 +137,7 @@ mod subdb {
         use anyhow::Result;
         use std::{fs::File, io::Write as _, time::SystemTime};
 
-        use chrono::{DateTime, Utc};
+        use chrono::Utc;
         use tempfile::TempDir;
 
         use super::{Entry, EntryChanged, Metadata};
@@ -379,7 +376,7 @@ pub(super) mod serde {
 }
 
 pub fn parse_from_file(path: impl AsRef<Path>) -> Result<Subtitles> {
-    Subtitles::parse_from_file(path, None).map_err(|e| e.into())
+    Subtitles::parse_from_file(path, None).map_err(Into::into)
 }
 
 fn _index_with_text(subs: Subtitles) -> HashMap<String, Subtitle> {
@@ -395,7 +392,7 @@ mod test {
     use std::path::PathBuf;
     use std::sync::LazyLock;
 
-    use std::fs;
+    
 
     static TEST_SUB: LazyLock<PathBuf> = LazyLock::new(|| {
         [env!("CARGO_MANIFEST_DIR"), "test", "gem_glow.srt"]

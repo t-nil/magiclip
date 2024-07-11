@@ -9,7 +9,6 @@
 use clap::Parser;
 use itertools::Itertools as _;
 use std::{
-    borrow::Borrow,
     collections::HashMap,
     io::stdin,
     path::{Component, Path, PathBuf},
@@ -73,7 +72,6 @@ fn main() -> anyhow::Result<()> {
             Ok(test)
         })
         .flatten_ok()
-        .into_iter()
         .partition_result();
 
     sub_errors
@@ -100,7 +98,7 @@ fn main() -> anyhow::Result<()> {
         .map(|s| {
             search_strings
                 .get(s)
-                .unwrap_or_else(|| panic!("IMPOSSIBLE: {}: not found in search entry hash map", s))
+                .unwrap_or_else(|| panic!("IMPOSSIBLE: {s}: not found in search entry hash map"))
         })
         .collect_vec();
 
@@ -133,9 +131,7 @@ fn main() -> anyhow::Result<()> {
                             .take(MAX_FILENAME_LEN)
                             .collect::<String>()),
                         infile
-                            .file_stem()
-                            .map(|s| s.to_string_lossy())
-                            .unwrap_or_else(|| "…empty…".to_owned().into()),
+                            .file_stem().map_or_else(|| "…empty…".to_owned().into(), |s| s.to_string_lossy()),
                         &clip.0.start_time,
                         args.profile
                     )));
@@ -154,7 +150,7 @@ fn main() -> anyhow::Result<()> {
             )?;
             anyhow::Ok(outfile)
         })
-        .for_each(|f| println!("{:?}", f));
+        .for_each(|f| println!("{f:?}"));
 
     Ok(())
 }

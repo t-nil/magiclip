@@ -3,7 +3,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use anyhow::{anyhow, Context, Error, Result};
+use anyhow::{anyhow, Context, Result};
 use itertools::Itertools as _;
 
 pub fn select(strings: &[impl AsRef<str>]) -> Result<Vec<String>> {
@@ -35,8 +35,7 @@ pub fn select(strings: &[impl AsRef<str>]) -> Result<Vec<String>> {
             output
                 .status
                 .code()
-                .map(|c| c.to_string())
-                .unwrap_or(String::from("-"))
+                .map_or(String::from("---"), |c| c.to_string())
         ));
     }
 
