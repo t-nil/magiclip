@@ -19,6 +19,7 @@ use scopeguard::{defer, ScopeGuard};
 use srtlib::{Subtitle, Timestamp};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, clap::ValueEnum, strum::Display)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum EncodingProfile {
     AV1,
     FLAC,

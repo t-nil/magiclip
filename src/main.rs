@@ -1,6 +1,10 @@
 #![feature(lazy_cell)]
 #![feature(exit_status_error)]
 #![feature(path_file_prefix)]
+#![deny(clippy::suspicious)]
+#![deny(clippy::perf)]
+#![warn(clippy::style)]
+#![warn(clippy::pedantic)]
 
 use clap::Parser;
 use itertools::Itertools as _;
@@ -10,7 +14,7 @@ use std::{
     io::stdin,
     path::{Component, Path, PathBuf},
 };
-use sub::SubContainedByFile;
+use sub::old::SubContainedByFile;
 
 mod cli;
 mod clip;
@@ -62,9 +66,11 @@ fn main() -> anyhow::Result<()> {
     let (subs, sub_errors): (Vec<_>, Vec<anyhow::Error>) = files
         .iter()
         .map(|f| {
-            Ok(sub::parse_from_file(f)?
+            let test = sub::parse_from_file(f)?
                 .into_iter()
-                .map(|s| SubContainedByFile(s, f)))
+                .map(|s| SubContainedByFile(s, f))
+                .collect_vec();
+            Ok(test)
         })
         .flatten_ok()
         .into_iter()

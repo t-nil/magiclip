@@ -6,7 +6,7 @@ use std::{
 use anyhow::{anyhow, Context, Error, Result};
 use itertools::Itertools as _;
 
-pub fn select(strings: &Vec<impl AsRef<str>>) -> Result<Vec<String>> {
+pub fn select(strings: &[impl AsRef<str>]) -> Result<Vec<String>> {
     let mut fzf = Command::new("fzf")
         .arg("-m") // multi select
         .stdin(Stdio::piped())
