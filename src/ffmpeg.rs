@@ -123,11 +123,7 @@ fn _how_many_subs(p: impl AsRef<Path>) -> Result<usize> {
     Ok(out
         .stdout
         .lines()
-        .filter(|l| {
-            l.as_ref()
-                .map(|s| s.trim() == "[STREAM]")
-                .unwrap_or(false)
-        })
+        .filter(|l| l.as_ref().map(|s| s.trim() == "[STREAM]").unwrap_or(false))
         .count())
 }
 
@@ -140,18 +136,18 @@ fn _how_many_subs(p: impl AsRef<Path>) -> Result<usize> {
 pub fn clip(
     infile: &Path,
     outfile: &Path,
-    start: &Timestamp,
-    end: &Timestamp,
+    start: Timestamp,
+    end: Timestamp,
     profile: EncodingProfile,
 ) -> Result<()> {
     ensure!(end > start);
-    let mut duration = *end;
-    duration.sub(start);
+    let mut duration = end;
+    duration.sub(&start);
 
-    #[allow(dropping_references)]
-    std::mem::drop(end);
+    #[allow(unused)]
+    let end = ();
 
-    let (start, duration) = (timestamp_to_string(start), timestamp_to_string(&duration));
+    let (start, duration) = (timestamp_to_string(start), timestamp_to_string(duration));
     _clip(infile, outfile, &start, &duration, profile)
 }
 
@@ -254,7 +250,7 @@ fn settings_to_args(settings: &EncodingSettings) -> Vec<&str> {
 /// 23.189
 /// 23.189 seconds
 /// ```
-fn timestamp_to_string(t: &Timestamp) -> String {
+fn timestamp_to_string(t: Timestamp) -> String {
     let (h, m, s, ms) = t.get();
     format!("{h:02}:{m:02}:{s:02}.{ms:03}")
 }
@@ -266,7 +262,7 @@ mod test {
     #[test]
     fn ffmpeg_duration() {
         assert_eq!(
-            &super::timestamp_to_string(&Timestamp::new(1, 2, 3, 50)),
+            &super::timestamp_to_string(Timestamp::new(1, 2, 3, 50)),
             "01:02:03.050"
         );
     }

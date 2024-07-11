@@ -6,7 +6,7 @@ use std::path::Path;
 
 mod subdb {
 
-    use anyhow::{anyhow, Context, Result};
+    use anyhow::{anyhow, ensure, Context, Result};
     use std::{
         collections::HashMap,
         fs::File,
@@ -74,15 +74,15 @@ mod subdb {
         /// # Important
         /// This compares ctime instead of mtime to detect renames.
         pub fn has_changed(&self) -> Result<EntryChanged> {
-            #[allow(clippy::wildcard_imports)]
+            #[allow(clippy::enum_glob_use)]
             use EntryChanged::*;
 
             // return ctime or mtime, whatever changed more recently
             fn relevant_timestamp(meta: &std::fs::Metadata) -> Result<i64> {
                 let ctime = meta.ctime().checked_mul(10i64.pow(9)).and_then(|ts| ts.checked_add(meta.ctime_nsec())).ok_or_else(|| anyhow!("nanos not fitting in i64. either corruption or we have the year ~2540+"))?;
                 let mtime = meta.mtime().checked_mul(10i64.pow(9)).and_then(|ts| ts.checked_add(meta.mtime_nsec())).ok_or_else(|| anyhow!("nanos not fitting in i64. either corruption or we have the year ~2540+"))?;
-                anyhow!(ctime > 0);
-                anyhow!(mtime > 0);
+                ensure!(ctime > 0);
+                ensure!(mtime > 0);
                 Ok(Ord::max(ctime, mtime))
             }
 
@@ -153,7 +153,7 @@ mod subdb {
             };
             let entry = Entry {
                 meta,
-                sub_files: Default::default(),
+                sub_files: Vec::default(),
             };
 
             assert_eq!(entry.has_changed()?, EntryChanged::NoLongerExists);
@@ -172,7 +172,7 @@ mod subdb {
             };
             let entry = Entry {
                 meta,
-                sub_files: Default::default(),
+                sub_files: Vec::default(),
             };
 
             assert_eq!(entry.has_changed()?, EntryChanged::NoLongerExists);
@@ -266,6 +266,7 @@ pub(super) mod serde {
         }
     }
 
+    #[allow(clippy::trivially_copy_pass_by_ref)]
     pub(super) mod timestamp {
         use serde::{Deserialize, Serialize};
 
@@ -294,22 +295,28 @@ pub(super) mod serde {
                 }
             }
 
-            pub fn get(&self) -> (u8, u8, u8, u16) {
+            pub fn get(self) -> (u8, u8, u8, u16) {
                 (self.hours, self.minutes, self.seconds, self.milliseconds)
             }
 
+            // getter pass by ref is needed by serde
+
+            #[allow(clippy::trivially_copy_pass_by_ref)]
             pub fn get_hours(ts: &srtlib::Timestamp) -> u8 {
                 ts.get().0
             }
 
+            #[allow(clippy::trivially_copy_pass_by_ref)]
             pub fn get_minutes(ts: &srtlib::Timestamp) -> u8 {
                 ts.get().1
             }
 
+            #[allow(clippy::trivially_copy_pass_by_ref)]
             pub fn get_seconds(ts: &srtlib::Timestamp) -> u8 {
                 ts.get().2
             }
 
+            #[allow(clippy::trivially_copy_pass_by_ref)]
             pub fn get_milliseconds(ts: &srtlib::Timestamp) -> u16 {
                 ts.get().3
             }
@@ -379,7 +386,7 @@ pub fn parse_from_file(path: impl AsRef<Path>) -> Result<Subtitles> {
     Subtitles::parse_from_file(path, None).map_err(Into::into)
 }
 
-fn _index_with_text(subs: Subtitles) -> HashMap<String, Subtitle> {
+fn _index_with_text(subs: &Subtitles) -> HashMap<String, Subtitle> {
     /*let mut subs = subs.to_vec();
     let from = subs.drain(..).map(|sub: Subtitle| (sub.text.clone(), sub));
 
@@ -389,6 +396,7 @@ fn _index_with_text(subs: Subtitles) -> HashMap<String, Subtitle> {
 
 mod test {
 
+    use std::fs;
     use std::path::PathBuf;
     use std::sync::LazyLock;
 

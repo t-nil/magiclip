@@ -27,6 +27,7 @@ const LINE_BREAK: char = '\n';
 const OUTPUT_DIR: &str = "/tmp/tmp.Z3fu02h0P5";
 const MAX_FILENAME_LEN: usize = 64;
 
+#[allow(clippy::too_many_lines)]
 fn main() -> anyhow::Result<()> {
     let args = cli::Args::parse();
 
@@ -58,9 +59,9 @@ fn main() -> anyhow::Result<()> {
         .partition_result();
 
     //files.iter().for_each(|f| println!("{f:?}"));
-    file_errors
-        .into_iter()
-        .for_each(|e| println!("Error getting subtitle files: {e:?}"));
+    for e in file_errors {
+        println!("Error getting subtitle files: {e:?}");
+    }
 
     let (subs, sub_errors): (Vec<_>, Vec<anyhow::Error>) = files
         .iter()
@@ -74,9 +75,9 @@ fn main() -> anyhow::Result<()> {
         .flatten_ok()
         .partition_result();
 
-    sub_errors
-        .into_iter()
-        .for_each(|e| println!("Error parsing subtitles: {e:?}"));
+    for e in sub_errors {
+        println!("Error parsing subtitles: {e:?}");
+    }
 
     let search_strings: HashMap<_, _> = subs
         .iter()
@@ -131,7 +132,8 @@ fn main() -> anyhow::Result<()> {
                             .take(MAX_FILENAME_LEN)
                             .collect::<String>()),
                         infile
-                            .file_stem().map_or_else(|| "…empty…".to_owned().into(), |s| s.to_string_lossy()),
+                            .file_stem()
+                            .map_or_else(|| "…empty…".to_owned().into(), |s| s.to_string_lossy()),
                         &clip.0.start_time,
                         args.profile
                     )));
@@ -144,8 +146,8 @@ fn main() -> anyhow::Result<()> {
             ffmpeg::clip(
                 &infile,
                 &outfile,
-                &clip.0.start_time,
-                &clip.0.end_time,
+                clip.0.start_time,
+                clip.0.end_time,
                 args.profile,
             )?;
             anyhow::Ok(outfile)
