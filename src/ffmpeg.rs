@@ -1,8 +1,5 @@
 use std::{
-    borrow::Cow,
     collections::HashMap,
-    ffi::OsStr,
-    fs::create_dir_all,
     io::BufRead,
     ops::Not as _,
     path::{Path, PathBuf},
@@ -14,6 +11,8 @@ use anyhow::{ensure, Result};
 use itertools::Itertools as _;
 use scopeguard::ScopeGuard;
 use srtlib::Timestamp;
+
+pub static VIDEO_EXTS: [&str; 7] = ["mp4", "mkv", "m4v", "wmv", "avi", "flv", "webm"];
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, clap::ValueEnum, strum::Display)]
 #[allow(clippy::upper_case_acronyms)]
@@ -61,29 +60,21 @@ static ENCODING_PROFILES: LazyLock<HashMap<EncodingProfile, EncodingSettings>> =
         .collect()
     });
 
-pub fn get_sub_files_in_dir(
+pub fn _get_sub_files_in_dir(
     p: impl AsRef<Path>,
-    output_dir: impl AsRef<Path>,
+    output_dir_fn: impl Fn(&Path) -> PathBuf + Copy,
 ) -> Result<Vec<PathBuf>> {
-    let output_dir = PathBuf::from(output_dir.as_ref()).join(
-        p.as_ref()
-            .file_name()
-            .map_or(Cow::Borrowed("…empty…"), OsStr::to_string_lossy)
-            .as_ref(),
-    );
-    create_dir_all(&output_dir)?;
-
+    let output_dir = output_dir_fn(p.as_ref());
     Ok(match p.as_ref() {
         t if t.is_dir() => std::fs::read_dir(p)?
             .flat_map(|entry| {
                 let entry = entry?;
-                let output_dir = output_dir.clone();
-                get_sub_files_in_dir(entry.path(), output_dir)
+                _get_sub_files_in_dir(entry.path(), output_dir_fn)
             })
             .flatten()
             .collect_vec(),
         t if t.is_symlink() => vec![],
-        t if t.is_file() => get_sub_files(p, output_dir.clone().as_path())?,
+        t if t.is_file() => extract_sub_files(p, output_dir.clone().as_path())?,
         _ => vec![],
     })
 
@@ -92,13 +83,16 @@ pub fn get_sub_files_in_dir(
     //Command::new("ffmpeg").args(["-i"])
 }
 
-pub fn get_sub_files(p: impl AsRef<Path>, output_dir: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
-    Ok((0..(_how_many_subs(p.as_ref())?))
+pub fn extract_sub_files(
+    path: impl AsRef<Path>,
+    output_dir: impl AsRef<Path>,
+) -> Result<Vec<PathBuf>> {
+    Ok((0..(how_many_subs(path.as_ref())?))
         .flat_map(|i| {
             let outfile = output_dir.as_ref().to_path_buf().join(format!("{i}.srt"));
             if outfile.exists().not() {
                 let out = Command::new("ffmpeg")
-                    .args(["-i", &p.as_ref().to_string_lossy(), "-map"])
+                    .args(["-i", &path.as_ref().to_string_lossy(), "-map"])
                     .arg(format!("0:s:{i}"))
                     .args(["-f", "srt"])
                     .arg(&outfile)
@@ -112,10 +106,10 @@ pub fn get_sub_files(p: impl AsRef<Path>, output_dir: impl AsRef<Path>) -> Resul
         .collect_vec())
 }
 
-fn _how_many_subs(p: impl AsRef<Path>) -> Result<usize> {
+fn how_many_subs(path: impl AsRef<Path>) -> Result<usize> {
     let out = Command::new("ffprobe")
         .args("-v error -show_streams -select_streams s".split(' '))
-        .arg(p.as_ref().as_os_str())
+        .arg(path.as_ref().as_os_str())
         .output()?;
 
     ensure!(out.status.success());
@@ -123,7 +117,7 @@ fn _how_many_subs(p: impl AsRef<Path>) -> Result<usize> {
     Ok(out
         .stdout
         .lines()
-        .filter(|l| l.as_ref().map(|s| s.trim() == "[STREAM]").unwrap_or(false))
+        .filter(|line| line.as_ref().map_or(false, |s| s.trim() == "[STREAM]"))
         .count())
 }
 
@@ -133,14 +127,20 @@ fn _how_many_subs(p: impl AsRef<Path>) -> Result<usize> {
     sub.start_time
 }*/
 
+// TODO check conversion between sub formats
+// TODO find out why the timestamps are so weird (clips being e.g. x+5 secs long
+// but starting at 5 secs)
+// TODO add offsets to buffer against badly synced subs
 pub fn clip(
-    infile: &Path,
-    outfile: &Path,
+    infile: impl AsRef<Path>,
+    outfile: impl AsRef<Path>,
     start: Timestamp,
     end: Timestamp,
     profile: EncodingProfile,
 ) -> Result<()> {
     ensure!(end > start);
+    let (infile, outfile) = (infile.as_ref(), outfile.as_ref());
+
     let mut duration = end;
     duration.sub(&start);
 

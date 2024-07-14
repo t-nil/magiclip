@@ -1,0 +1,60 @@
+---
+source: src/sub.rs
+expression: result
+---
+[
+    Subtitle(
+        Subtitle {
+            num: 1,
+            start_time: Timestamp {
+                hours: 0,
+                minutes: 0,
+                seconds: 0,
+                milliseconds: 200,
+            },
+            end_time: Timestamp {
+                hours: 0,
+                minutes: 0,
+                seconds: 3,
+                milliseconds: 598,
+            },
+            text: "<i>♪ We are the Crystal Gems ♪</i>",
+        },
+    ),
+    Subtitle(
+        Subtitle {
+            num: 2,
+            start_time: Timestamp {
+                hours: 0,
+                minutes: 0,
+                seconds: 3,
+                milliseconds: 699,
+            },
+            end_time: Timestamp {
+                hours: 0,
+                minutes: 0,
+                seconds: 6,
+                milliseconds: 220,
+            },
+            text: "<i>♪ we'll always save the day ♪</i>",
+        },
+    ),
+    Subtitle(
+        Subtitle {
+            num: 319,
+            start_time: Timestamp {
+                hours: 0,
+                minutes: 18,
+                seconds: 39,
+                milliseconds: 547,
+            },
+            end_time: Timestamp {
+                hours: 0,
+                minutes: 18,
+                seconds: 42,
+                milliseconds: 281,
+            },
+            text: "♪ Let me drive my van into your heart ♪\n",
+        },
+    ),
+]

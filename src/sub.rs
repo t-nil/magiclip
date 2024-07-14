@@ -1,26 +1,38 @@
 use ::serde::{Deserialize, Serialize};
-use anyhow::Result;
-use srtlib::Subtitles;
-use std::collections::HashMap;
+use anyhow::{Context, Result};
+use itertools::Itertools as _;
 use std::path::Path;
 
-mod subdb {
+use crate::{util, CLIP_FILENAME_PATH_LEN, CLIP_FILENAME_TEXT_LEN};
+
+// TODO check if module scopes are sufficiently granular, if I could encapsulate
+// more and if functions interdepend too much / use private apis/structs which
+// break invariants.c
+
+pub mod db {
 
     use anyhow::{anyhow, ensure, Context, Result};
+    use derive_getters::Getters;
+    use itertools::Itertools;
+    use log::{error, warn};
+    use rayon::iter::{IntoParallelRefIterator as _, ParallelIterator};
+    use serde_with::serde_as;
     use std::{
         collections::HashMap,
         fs::File,
-        io::BufReader,
+        io::{BufReader, BufWriter},
         os::unix::fs::MetadataExt as _,
         path::{Path, PathBuf},
+        sync::Arc,
     };
+    use strum::EnumDiscriminants;
 
     use chrono::{DateTime, Utc};
     use serde::{Deserialize, Serialize};
 
-    use super::Subtitle;
+    use crate::{ffmpeg, to_anyhow};
 
-    type Subtitles = Vec<Subtitle>;
+    use super::Subtitles;
 
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct Key {
@@ -28,45 +40,58 @@ mod subdb {
     }
 
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    enum SubPath {
-        InternalFFmpeg { stream_id: u32 },
+    pub enum SubPath {
+        InternalFFmpeg { stream_id: usize },
         External { path: PathBuf },
     }
 
-    #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-    struct Metadata {
+    #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Getters)]
+    pub struct Metadata {
         video_path: PathBuf,
         /// time the entry got indexed, not the vid was modified
         time: DateTime<Utc>,
     }
 
-    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    struct Entry {
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Getters)]
+    pub struct Entry {
         meta: Metadata,
         sub_files: Vec<(SubPath, Subtitles)>,
     }
 
-    type Val = Entry;
+    // smart pointers b/c of `lookup()`: Somehow borrow checker denies both returning
+    // a ref to db (an existing val) and using a mut ref (inserting a new entry)
+    // inside the same function
+    type Val = Arc<Entry>;
     type InternalDB = HashMap<Key, Val>;
 
+    #[serde_as]
     #[derive(Clone, Default, Debug, Serialize, Deserialize)]
     pub struct SubDB {
+        #[serde_as(as = "Vec<(_, _)>")]
         db: InternalDB,
-        db_path: Option<PathBuf>,
+        db_path: PathBuf,
     }
 
-    impl Key {
-        pub fn new(path: impl AsRef<Path>) -> Self {
-            Self {
-                video_path: path.as_ref().to_owned(),
-            }
-        }
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    enum SubDBVersioned {
+        #[serde(rename = "0.2")]
+        Current(InternalDB),
+        #[serde(other)]
+        Unsupported,
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum EntryChanged {
-        NoLongerExists,
         Yes,
+        No,
+        Gone,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, EnumDiscriminants)]
+    pub enum EntryFound {
+        YesButGone,
+        YesButChanged,
+        Yes(Val),
         No,
     }
 
@@ -87,10 +112,9 @@ mod subdb {
             }
 
             if !self.meta.video_path.exists() || !self.meta.video_path.is_file() {
-                return Ok(NoLongerExists);
+                return Ok(Gone);
             }
-            let db_scan_nanos = 
-            self.meta.time.timestamp_nanos_opt().ok_or_else(|| anyhow!("nsec timestamp not in u64 range. Either corrupt SubDB or more than 580 years have passed.")).
+            let db_scan_nanos = self.meta.time.timestamp_nanos_opt().ok_or_else(|| anyhow!("nsec timestamp not in u64 range. Either corrupt SubDB or more than 580 years have passed.")).
             with_context(|| {
                 format!(
                     "trying to parse _SubDB_ metadata for file {file:?}",
@@ -119,21 +143,151 @@ mod subdb {
                 Ok(No)
             }
         }
+
+        fn from_path(key: &Key) -> Result<(Self, Vec<anyhow::Error>)> {
+            let ctx = |what: &str| {
+                let what = what.to_owned();
+                move || {
+                    format!(
+                        "{what} sub files from {file}",
+                        file = key.video_path.to_string_lossy()
+                    )
+                }
+            };
+
+            let scan_time = Utc::now();
+            let temp_dir = tempfile::tempdir()?;
+
+            let subs = ffmpeg::extract_sub_files(&key.video_path, &temp_dir)
+                .with_context(ctx("Extracting"))?;
+            let subs = subs.iter().enumerate().map(|(stream_id, sub_file)| {
+                Ok((
+                    SubPath::InternalFFmpeg { stream_id },
+                    super::parse_from_file(sub_file).with_context(ctx("Parsing"))?,
+                ))
+            });
+
+            let (subs, errors): (Vec<_>, Vec<_>) = subs.partition_result();
+            Ok((
+                Self {
+                    meta: Metadata {
+                        video_path: key.video_path.clone(),
+                        time: scan_time,
+                    },
+                    sub_files: subs,
+                },
+                errors,
+            ))
+        }
+
+        pub fn as_identifying_strings(&self) -> impl Iterator<Item = String> + '_ {
+            self.sub_files
+                .iter()
+                .flat_map(|(_, subs)| subs)
+                .map(|sub| sub.as_identifying_string(&self.meta.video_path, Default::default()))
+        }
     }
 
     impl SubDB {
-        pub fn load(db_path: impl AsRef<Path>) -> Result<Self> {
-            let db_path = db_path.as_ref();
+        pub fn load(db_file: impl AsRef<Path>) -> Result<Self> {
+            #[allow(clippy::enum_glob_use)]
+            use SubDBVersioned::*;
+
+            let db_file = db_file.as_ref();
+
+            let db = if db_file.exists() {
+                let db_version_wrapper =
+                    serde_json::from_reader(BufReader::new(File::open(db_file)?))?;
+                match db_version_wrapper {
+                    Current(db) => db,
+                    Unsupported => {
+                        panic!("Wrong version in DB file detected (0.1 is the only supported)",)
+                    }
+                }
+            } else {
+                HashMap::default()
+            };
 
             Ok(Self {
-                db_path: Some(db_path.to_owned()),
-                db: serde_json::from_reader(BufReader::new(File::open(db_path)?))?,
+                db_path: db_file.to_owned(),
+                db,
             })
+        }
+
+        pub fn save(&self) -> Result<()> {
+            // TODO clone is probably overkill, but I cannot use a ref in `SubDBVersioned`
+            // because then deserializing gets more complicated. ('d have to investigate tho)
+            let db_versioned = SubDBVersioned::Current(self.db.clone());
+            to_anyhow(serde_json::to_writer_pretty(
+                BufWriter::new(File::create(&self.db_path)?),
+                &db_versioned,
+            ))
+        }
+
+        pub fn lookup(&self, key: &Key) -> Result<EntryFound> {
+            #[allow(clippy::enum_glob_use)]
+            use EntryFound::*;
+
+            let found = if let Some(entry) = self.db.get(key).map(Clone::clone) {
+                match entry.has_changed().with_context(|| {
+                    format!("determining if entry with key {key:#?} has changed")
+                })? {
+                    EntryChanged::Yes => YesButChanged,
+                    EntryChanged::No => Yes(entry),
+                    EntryChanged::Gone => YesButGone,
+                }
+            } else {
+                No
+            };
+
+            Ok(found)
+        }
+
+        /// Gets the entry from the DB if it exists and is up-to-date (file hasn't
+        /// been modified in between). Otherwise create it (from the file).
+        pub fn lookup_or_update(&mut self, key: &Key) -> Result<Option<Val>> {
+            fn insert(self_: &mut SubDB, key: &Key) -> Result<Val> {
+                // passing up errored sub files gets too complicated; bailing out by logging
+                let new_entry = Entry::from_path(key).context("creating DB entry from file")?;
+                for error in new_entry.1 {
+                    warn!("Error parsing subs:\n{error:#}");
+                }
+
+                let _ = self_.db.insert(key.clone(), Val::new(new_entry.0));
+                Ok(self_.db.get(key).unwrap().clone())
+            }
+            match self.lookup(key)? {
+                EntryFound::YesButGone => {
+                    self.db.remove(key);
+                    Ok(None)
+                }
+                EntryFound::Yes(val) => Ok(Some(val)),
+                EntryFound::YesButChanged | EntryFound::No => Some(insert(self, key)).transpose(),
+            }
+        }
+
+        pub fn as_identifying_strings(&self) -> impl ParallelIterator<Item = (&Key, String)> + '_ {
+            self.db
+                .par_iter()
+                .map(|(key, entry)| entry.as_identifying_strings().map(move |id| (key, id)))
+                .flatten_iter()
+        }
+
+        pub fn len(&self) -> usize {
+            self.db.len()
+        }
+    }
+
+    impl Drop for SubDB {
+        fn drop(&mut self) {
+            self.save().unwrap_or_else(|e| error!("Saving failed: {e}"));
         }
     }
 
     #[cfg(test)]
     mod tests {
+        #![allow(non_snake_case)]
+
         use anyhow::Result;
         use std::{fs::File, io::Write as _, time::SystemTime};
 
@@ -143,7 +297,7 @@ mod subdb {
         use super::{Entry, EntryChanged, Metadata};
 
         #[test]
-        fn test_no_longer_exists() -> Result<()> {
+        fn has_changed__no_longer_exists() -> Result<()> {
             let temp_dir = TempDir::new()?;
             let video_path = temp_dir.path().join("video.mp4");
 
@@ -156,13 +310,13 @@ mod subdb {
                 sub_files: Vec::default(),
             };
 
-            assert_eq!(entry.has_changed()?, EntryChanged::NoLongerExists);
+            assert_eq!(entry.has_changed()?, EntryChanged::Gone);
 
             Ok(())
         }
 
         #[test]
-        fn test_no_longer_exists_not_a_file() -> Result<()> {
+        fn has_changed__no_longer_exists_not_a_file() -> Result<()> {
             let temp_dir = TempDir::new()?;
             let video_path = temp_dir.path();
 
@@ -175,19 +329,18 @@ mod subdb {
                 sub_files: Vec::default(),
             };
 
-            assert_eq!(entry.has_changed()?, EntryChanged::NoLongerExists);
+            assert_eq!(entry.has_changed()?, EntryChanged::Gone);
 
             Ok(())
         }
 
         #[test]
-        fn test_has_changed_yes() -> Result<()> {
+        fn has_changed__yes() -> Result<()> {
             let temp_dir = TempDir::new()?;
             let video_path = temp_dir.path().join("video.mp4");
 
             // IMPORTANT: call `sync_all()`/`sync_data()`, otherwise the timestamp is incorrect
             {
-
                 let mut file = File::create(&video_path)?;
                 writeln!(file, "Test content")?;
                 file.sync_all()?;
@@ -215,14 +368,13 @@ mod subdb {
             dbg!(video_path.metadata()?.modified()?);
             dbg!(std::fs::read_to_string(&video_path)?);
 
-
             assert_eq!(entry.has_changed()?, EntryChanged::Yes);
 
             Ok(())
         }
 
         #[test]
-        fn test_has_changed_no() -> Result<()> {
+        fn has_changed__no() -> Result<()> {
             let temp_dir = TempDir::new()?;
             let video_path = temp_dir.path().join("video.mp4");
 
@@ -247,7 +399,61 @@ mod subdb {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-struct Subtitle(#[serde(with = "serde::subtitle::Subtitle")] srtlib::Subtitle);
+pub struct Subtitle(#[serde(with = "serde::subtitle::Subtitle")] srtlib::Subtitle);
+
+type Subtitles = Vec<Subtitle>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SubtitleStringFormatOptions {
+    Filename,
+    #[default]
+    None,
+}
+
+impl Subtitle {
+    pub fn as_identifying_string(
+        &self,
+        path: impl AsRef<Path>,
+        format_opts: SubtitleStringFormatOptions,
+    ) -> String {
+        #[allow(clippy::enum_glob_use)]
+        use SubtitleStringFormatOptions::*;
+        let line_len = if format_opts == Filename {
+            CLIP_FILENAME_TEXT_LEN
+        } else {
+            usize::MAX
+        };
+
+        let path_len = if format_opts == Filename {
+            CLIP_FILENAME_PATH_LEN
+        } else {
+            usize::MAX
+        };
+
+        util::escape_for_unix_filename(&format!(
+            "{line:.line_len$} [{timestamp}] ({path:.path_len$})",
+            line = &self.0.text,
+            line_len = line_len,
+            timestamp = self.0.start_time,
+            path = path.as_ref().to_string_lossy(),
+            path_len = path_len,
+        ))
+    }
+}
+
+pub fn parse_from_file(path: impl AsRef<Path>) -> Result<Subtitles> {
+    // TODO maybe convert non-UTF8 charsets with crates `encoding_rs` and `chardetng`
+    let content =
+        std::fs::read(&path).with_context(|| String::from(path.as_ref().to_string_lossy()))?;
+    let utf8_content = String::from_utf8_lossy(&content);
+
+    Ok(srtlib::Subtitles::parse_from_str(utf8_content.into_owned())
+        .map_err(Into::<anyhow::Error>::into)?
+        .to_vec() // get underlying vec
+        .into_iter()
+        .map(Subtitle) // convert to _our_ subtitle type
+        .collect_vec())
+}
 
 pub(super) mod serde {
     pub(super) mod subtitle {
@@ -382,25 +588,11 @@ pub(super) mod serde {
     //}
 }
 
-pub fn parse_from_file(path: impl AsRef<Path>) -> Result<Subtitles> {
-    Subtitles::parse_from_file(path, None).map_err(Into::into)
-}
-
-fn _index_with_text(subs: &Subtitles) -> HashMap<String, Subtitle> {
-    /*let mut subs = subs.to_vec();
-    let from = subs.drain(..).map(|sub: Subtitle| (sub.text.clone(), sub));
-
-    from.collect::<HashMap<_, _>>()*/
-    todo!()
-}
-
+#[cfg(test)]
 mod test {
 
-    use std::fs;
     use std::path::PathBuf;
     use std::sync::LazyLock;
-
-    
 
     static TEST_SUB: LazyLock<PathBuf> = LazyLock::new(|| {
         [env!("CARGO_MANIFEST_DIR"), "test", "gem_glow.srt"]
@@ -411,28 +603,23 @@ mod test {
     #[test]
     fn parse() {
         let result = super::parse_from_file(TEST_SUB.as_path()).unwrap();
-        let expected = [
-            env!("CARGO_MANIFEST_DIR"),
-            "test",
-            "expected",
-            "sub",
-            "parse.txt",
-        ]
-        .iter()
-        .collect::<PathBuf>();
-        // trim_end() because of unix newline
-        assert_eq!(
-            format!("{result:#?}"),
-            fs::read_to_string(expected).unwrap().trim_end()
-        );
+        insta::assert_debug_snapshot!(result);
     }
 }
 
 pub mod old {
-    use std::path::Path;
+    use std::{ops::Deref, path::Path};
 
-    use srtlib::Subtitle;
+    use super::Subtitle;
 
     #[derive(Clone, Debug, PartialEq, Eq, Hash)]
     pub struct SubContainedByFile<'a>(pub Subtitle, pub &'a Path);
+
+    impl Deref for Subtitle {
+        type Target = srtlib::Subtitle;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
 }

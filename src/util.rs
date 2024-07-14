@@ -1,6 +1,6 @@
-
 // gerüst from ChatGTFO
 pub fn escape_for_unix_filename(input: &str) -> String {
+    // TODO use unicode for / and :
     let mut result: String = input
         .chars()
         .map(|c| match c {
@@ -11,7 +11,7 @@ pub fn escape_for_unix_filename(input: &str) -> String {
         .map(|(i, c)| if i == 0 && c == '-' { '_' } else { c })
         .collect();
 
-    for pat in ['\n', '\r'] {
+    for pat in ["\r\n", "\n", "\r"] {
         result = result.replace(pat, "___");
     }
     result
